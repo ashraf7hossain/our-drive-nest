@@ -1,30 +1,33 @@
-import { HttpException, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  HttpException,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { AuthPayloadDto } from './dto/auth.dto';
 import { JwtService } from '@nestjs/jwt';
+import { RegisterUserPayloadDto } from './dto/register.dto';
+import { InjectRepository } from '@nestjs/typeorm';
+import { User } from 'src/typeorm/entities/User';
+import { Repository } from 'typeorm';
 
-const fakeUsers = [
-  { id: 1, username: 'admin', password: 'admin' },
-  { id: 2, username: 'user', password: 'user' },
-  { id: 3, username: 'guest', password: 'guest' },
-];
 @Injectable()
 export class AuthService {
+  constructor(
+    private jwtService: JwtService,
+    @InjectRepository(User) private userRepository: Repository<User>,
+  ) {}
 
-  constructor(private jwtService: JwtService) {}
-  getHello(): string {
-    return 'Hello World!';
+  async register(registerUserPayloadDto: RegisterUserPayloadDto) {
+    const newUser = this.userRepository.create(registerUserPayloadDto);
+    return this.userRepository.save(newUser);
   }
 
-  validateUsr({ username, password }: AuthPayloadDto) {
-    const findUser = fakeUsers.find(
-      (user) => user.username === username,
-    );
-    if(!findUser){
+  async validateUsr({ username, password }: AuthPayloadDto) {
+    const findUser = await this.userRepository.findOne({ where: { username } });
+    if (!findUser || findUser.password !== password) {
       return null;
     }
-    if(findUser.password === password){
-      const { password, ...user } = findUser;
-      return this.jwtService.sign(user);
-    }
+    const { password: _, ...user } = findUser;
+    return this.jwtService.sign(user);
   }
 }
