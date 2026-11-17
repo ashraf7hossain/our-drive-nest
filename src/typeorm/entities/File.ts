@@ -6,6 +6,9 @@ export class File {
   @PrimaryGeneratedColumn()
   id: number;
 
+  @Column({ type: "varchar", nullable: true, unique: true })
+  uploadId: string;
+
   @Column({ default: "private" })
   visibility: "private" | "public";
 
@@ -18,7 +21,7 @@ export class File {
   @Column()
   fileType: string;
 
-  @Column()
+  @Column({ type: "bigint" })
   fileSize: number;
 
   @ManyToOne(() => User, (user) => user.files , { onDelete: 'CASCADE' })

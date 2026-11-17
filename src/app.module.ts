@@ -6,9 +6,11 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { User } from './typeorm/entities/User';
 import { File } from './typeorm/entities/File';
 import { FileModule } from './file/file.module';
+import { RedisModule } from './redis/redis.module';
 
 @Module({
   imports: [
+    RedisModule,
     AuthModule,
     FileModule,
     TypeOrmModule.forRoot({

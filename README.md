@@ -1,85 +1,86 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Our Drive API
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+NestJS service for a personal file library. Accounts live in Postgres, upload sessions and file listings live in Redis, and file bytes live on disk.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://coveralls.io/github/nestjs/nest?branch=master" target="_blank"><img src="https://coveralls.io/repos/github/nestjs/nest/badge.svg?branch=master#9" alt="Coverage" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+The React client is the sibling project `../our-drive-web` and calls this API on port 3000.
 
-## Description
+## Architecture
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+```mermaid
+flowchart LR
+  client[Browser client]
+  api[Nest API :3000]
+  pg[(Postgres)]
+  redis[(Redis)]
+  disk[uploads directory]
 
-## Project setup
-
-```bash
-$ npm install
+  client -->|JWT and chunked uploads| api
+  api --> pg
+  api --> redis
+  api --> disk
 ```
 
-## Compile and run the project
+| Piece | Responsibility |
+| --- | --- |
+| `AuthModule` | Register a user, check username and password, issue a JWT. |
+| `FileModule` | List, rename, download, and delete files. Enforce public versus private visibility. |
+| `UploadService` | Accept a file in chunks, remember the byte offset, and commit the file when the declared size is reached. |
+| `RedisModule` | Store in-progress upload sessions, per-upload locks, and short-lived file listings. |
+| Postgres | Store users and completed file metadata. TypeORM `synchronize` creates the tables in development. |
+| `uploads/` | Hold partial chunks in `uploads/.partials` and finished files beside them. This directory is gitignored. |
+
+A request for a file record is allowed when the file is public, or when the JWT belongs to the owner. Rename and delete require the owner. `OptionalJwtAuthGuard` lets anonymous callers read public files and still attaches the user when a bearer token is present.
+
+### Resumable upload
+
+Large files use an offset protocol so a dropped connection can continue from the last saved byte.
+
+1. `POST /files/uploads` creates a session in Redis (`upload:session:{id}`, 24 hours) and an empty temp file.
+2. `PUT /files/uploads/:uploadId` appends one chunk. The client sends `Upload-Offset` and `Content-Range: bytes start-end/total`.
+3. The server locks that upload, writes the chunk at the current offset, and advances the offset only after the full chunk is buffered.
+4. A retry of the same chunk is treated as a duplicate. A gap returns `409` with the offset the server still expects.
+5. When the offset equals the declared size, the temp file is renamed into `uploads/` and a `files` row is saved.
+6. `GET /files/uploads/:uploadId` reports the current offset. `DELETE` aborts an unfinished session.
+
+Recommended chunk size is 5 MB. A chunk cannot exceed 8 MB, and a file cannot exceed 5 GB. `POST /files/upload` remains available for a single multipart upload.
+
+### Cache
+
+`GET /files` and `GET /files/:id` are cached in Redis for 120 seconds under `cache:files:`. The response header `X-Cache` is `HIT` or `MISS`. Creating, updating, or deleting a file clears that prefix. If Redis is down, those reads fail rather than serving an uncached fallback.
+
+## HTTP API
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `POST` | `/auth/register` | no | Create a user (`username`, `email`, `password`). |
+| `POST` | `/auth/login` | no | Return a JWT string. Body is `{ username, password }`. |
+| `GET` | `/auth/status` | JWT | Return the token payload. |
+| `GET` | `/files` | optional | List files the caller is allowed to see. |
+| `GET` | `/files/:id` | optional | Fetch one file record. |
+| `GET` | `/files/:id/content` | optional | Download the bytes. The path must stay inside `uploads/`. |
+| `PATCH` | `/files/:id` | owner | Change `fileName` and/or `visibility` (`private` or `public`). |
+| `DELETE` | `/files/:id` | owner | Delete the record and the stored bytes. |
+| `POST` | `/files/uploads` | JWT | Start a chunked upload. |
+| `PUT` | `/files/uploads/:uploadId` | JWT | Append a chunk. |
+| `GET` | `/files/uploads/:uploadId` | JWT | Read the current offset. |
+| `DELETE` | `/files/uploads/:uploadId` | JWT | Abort an unfinished upload. |
+| `POST` | `/files/upload` | JWT | Upload one file as multipart field `file`, with `visibility`. |
+
+CORS allows `http://localhost:5173` and `http://127.0.0.1:5173`, and exposes `Upload-Offset`, `Upload-Length`, `X-Cache`, and `Content-Disposition`.
+
+## Run locally
+
+Start Postgres and Redis:
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+docker compose up -d
 ```
 
-## Run tests
+Postgres listens on `localhost:5432` (`postgres` / `postgres`). Redis listens on `localhost:6379`. Override the Redis host with `REDIS_HOST`, `REDIS_PORT`, and `REDIS_PASSWORD`.
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+npm install
+npm run start:dev
 ```
 
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+The API listens on port 3000. Run the unit tests with `npm test`.
